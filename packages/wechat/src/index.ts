@@ -6,9 +6,9 @@
 
 import { createOpencode } from "@opencode-ai/sdk"
 import * as WeixinBot from "./api"
+import type { WeixinAccount } from "./api"
 import {
   MessageItemType,
-  type WeixinAccount,
   type WeixinMessage,
 } from "./types"
 import { handleCommand, type CommandResult } from "./commands"
@@ -283,7 +283,7 @@ async function processMessage(
         text: selResult.response,
         baseUrl: account.baseUrl,
         token: account.token,
-        contextToken: msg.context_token,
+        contextToken: msg.context_token ?? "",
       })
       return
     }
@@ -318,7 +318,7 @@ async function processMessage(
         text: cmdResult.response,
         baseUrl: account.baseUrl,
         token: account.token,
-        contextToken: msg.context_token,
+        contextToken: msg.context_token ?? "",
       })
       return
     }
@@ -338,7 +338,7 @@ async function processMessage(
           text: cmdResult.response,
           baseUrl: account.baseUrl,
           token: account.token,
-          contextToken: msg.context_token,
+          contextToken: msg.context_token ?? "",
         })
         return
       }
@@ -446,7 +446,6 @@ async function processMessage(
         
         const retryText =
           retryResponse.info?.content ||
-          retryResponse.content ||
           retryResponse.parts
             ?.filter((p: any) => p.type === "text")
             .map((p: any) => p.text)

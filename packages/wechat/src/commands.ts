@@ -135,11 +135,11 @@ export async function handleCommand(ctx: CommandContext, command: string, args: 
         }
 
         // 显示供应商列表
-        const providerList = providers.map((p, i) => `${i + 1}. ${p.name || p.id} (${Object.keys(p.models || {}).length}个模型)`).join("\n")
+        const providerList = providers.map((p: any, i: number) => `${i + 1}. ${p.name || p.id} (${Object.keys(p.models || {}).length}个模型)`).join("\n")
         
         setPendingAction(userId, {
           type: "select-provider",
-          providers: providers.map(p => ({ id: p.id, name: p.name || p.id, models: p.models || {} })),
+          providers: providers.map((p: any) => ({ id: p.id, name: p.name || p.id, models: p.models || {} })),
         })
 
         return {
