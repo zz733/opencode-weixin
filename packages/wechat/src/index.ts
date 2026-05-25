@@ -37,34 +37,69 @@ function markMessageProcessed(msgId: number): void {
 }
 
 /** 从消息中提取内容（文本或语音转文字） */
-function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean } | undefined {
+function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean; imageUrl?: string } | undefined {
   if (!msg.item_list?.length) return
 
   for (const item of msg.item_list) {
-    // 文本消息
     if (item.type === MessageItemType.TEXT && item.text_item?.text != null) {
       return { text: String(item.text_item.text), hasMedia: false }
     }
-    // 语音消息 - 优先使用语音转文字结果
     if (item.type === MessageItemType.VOICE && item.voice_item?.text) {
       return { text: `[语音转文字] ${item.voice_item.text}`, hasMedia: true }
     }
-    // 语音消息无文字时
     if (item.type === MessageItemType.VOICE) {
       return { text: "[语音消息]", hasMedia: true }
     }
-    // 图片消息
     if (item.type === MessageItemType.IMAGE) {
-      return { text: "[图片消息]", hasMedia: true }
+      const imageUrl = item.image_item?.media?.full_url || item.image_item?.url
+      return { text: "[图片消息]", hasMedia: true, imageUrl }
     }
-    // 文件消息
     if (item.type === MessageItemType.FILE && item.file_item?.file_name) {
       return { text: `[文件: ${item.file_item.file_name}]`, hasMedia: true }
     }
-    // 视频消息
     if (item.type === MessageItemType.VIDEO) {
       return { text: "[视频消息]", hasMedia: true }
     }
+  }
+}
+
+async function downloadImageAsBase64(url: string): Promise<{ base64: string; mime: string } | null> {
+  try {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) })
+    if (!resp.ok) return null
+    const contentType = resp.headers.get("content-type") || "image/jpeg"
+    const mime = contentType.split(";")[0].trim()
+    const buffer = Buffer.from(await resp.arrayBuffer())
+    if (buffer.length > 10 * 1024 * 1024) return null
+    return { base64: buffer.toString("base64"), mime }
+  } catch {
+    return null
+  }
+}
+
+async function checkModelSupportsImage(opencode: any, prefs: any): Promise<boolean> {
+  try {
+    const providersResp = await opencode.client.config.providers()
+    const providers = providersResp.data?.providers ?? []
+    if (!prefs.model?.providerID || !prefs.model?.modelID) {
+      for (const provider of providers) {
+        const models = provider.models || {}
+        for (const [modelID, modelInfo] of Object.entries(models)) {
+          const info = modelInfo as any
+          if (info.modalities?.input?.includes("image") || info.vision || info.multimodal) {
+            return true
+          }
+        }
+      }
+      return false
+    }
+    const provider = providers.find((p: any) => p.id === prefs.model.providerID)
+    if (!provider) return false
+    const modelInfo = (provider.models || {})[prefs.model.modelID] as any
+    if (!modelInfo) return false
+    return !!(modelInfo.modalities?.input?.includes("image") || modelInfo.vision || modelInfo.multimodal)
+  } catch {
+    return false
   }
 }
 
@@ -346,7 +381,48 @@ async function processMessage(
   const prefs = getUserPreferences(userId)
   console.log(`用户偏好: model=${JSON.stringify(prefs.model)}, agent=${prefs.agent}`)
   
-  const promptBody: any = { parts: [{ type: "text", text }] }
+  let promptBody: any
+
+  // 处理图片消息
+  if (content.imageUrl) {
+    const supportsImage = await checkModelSupportsImage(opencode, prefs)
+    if (!supportsImage) {
+      await sendTextMessage({
+        to: userId,
+        text: "⚠️ 当前模型不支持图片输入。请使用 /m 切换到支持图片的模型（如 GPT-4o、Claude 等）。",
+        baseUrl: account.baseUrl,
+        token: account.token,
+        contextToken: msg.context_token ?? "",
+      })
+      return
+    }
+
+    console.log(`下载图片: ${content.imageUrl.slice(0, 100)}...`)
+    const imageData = await downloadImageAsBase64(content.imageUrl)
+    if (!imageData) {
+      await sendTextMessage({
+        to: userId,
+        text: "❌ 图片下载失败，请重新发送。",
+        baseUrl: account.baseUrl,
+        token: account.token,
+        contextToken: msg.context_token ?? "",
+      })
+      return
+    }
+
+    console.log(`图片下载成功: mime=${imageData.mime}, size=${imageData.base64.length}`)
+    const dataUrl = `data:${imageData.mime};base64,${imageData.base64}`
+
+    promptBody = {
+      parts: [
+        { type: "text", text: text === "[图片消息]" ? "请描述这张图片" : text },
+        { type: "file", mime: imageData.mime, url: dataUrl, filename: "image.jpg" },
+      ],
+    }
+  } else {
+    promptBody = { parts: [{ type: "text", text }] }
+  }
+
   if (prefs.model) {
     promptBody.model = prefs.model
   }
