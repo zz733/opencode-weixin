@@ -7,11 +7,12 @@
 import { createOpencode } from "@opencode-ai/sdk"
 import * as WeixinBot from "./api"
 import type { WeixinAccount } from "./api"
+import { sendTextMessage as sendWechatText } from "./messenger"
 import {
   MessageItemType,
   type WeixinMessage,
 } from "./types"
-import { handleCommand, type CommandResult } from "./commands"
+import { handleCommand, handlePendingSelection, type CommandResult } from "./commands"
 import {
   getContextToken,
   getPendingAction,
@@ -104,19 +105,13 @@ async function sendTextMessage(params: {
   contextToken?: string
 }) {
   const { to, text, baseUrl, token, contextToken } = params
-  console.log(`准备发送微信消息: to=${to}, text长度=${text.length}`)
-  
   const maxLen = 1500
 
   if (text.length <= maxLen) {
-    console.log(`调用 WeixinBot.sendText...`)
-    const resp = await WeixinBot.sendText({ to, text, baseUrl, token, contextToken })
-    console.log(`微信消息发送完成, API响应:`, resp?.slice(0, 200))
+    await sendWechatText({ to, text, baseUrl, token, contextToken })
     return
   }
 
-  // 长消息分段发送
-  console.log(`长消息，分段发送...`)
   const chunks: string[] = []
   let remaining = text
   while (remaining.length > 0) {
@@ -131,9 +126,8 @@ async function sendTextMessage(params: {
   }
 
   for (const chunk of chunks) {
-    await WeixinBot.sendText({ to, text: chunk, baseUrl, token, contextToken })
+    await sendWechatText({ to, text: chunk, baseUrl, token, contextToken })
   }
-  console.log(`微信消息分段发送完成`)
 }
 
 /** 运行机器人 */
@@ -174,11 +168,15 @@ export async function runBot() {
       })
 
       if (!updates?.msgs?.length) {
-        // 更新 buf 用于下次轮询
         if (updates?.get_updates_buf) {
           getUpdatesBuf = updates.get_updates_buf
         }
         continue
+      }
+
+      console.log(`收到 ${updates.msgs.length} 条消息`)
+      for (const msg of updates.msgs) {
+        console.log(`  msg: id=${msg.message_id} from=${msg.from_user_id} type=${msg.message_type} text=${msg.item_list?.[0]?.text_item?.text?.slice(0, 20)}`)
       }
 
       // 保存最新的 get_updates_buf
@@ -187,8 +185,7 @@ export async function runBot() {
       }
 
       for (const msg of updates.msgs) {
-        // 只处理来自用户的文本/语音/图片消息
-        if (msg.from_user_id?.endsWith("@im.wechat")) {
+        if (msg.from_user_id?.endsWith("@im.wechat") && msg.message_type !== 2) {
           await processMessage(msg, account, opencode, sessions)
         }
       }
@@ -272,9 +269,8 @@ async function processMessage(
   // 检查是否有待处理的交互操作（选择模型/Agent）
   const pending = getPendingAction(userId)
   if (pending) {
-    const selResult = await handleCommand(
+    const selResult = await handlePendingSelection(
       { userId, account, sessionId: session.sessionId, msg, opencode },
-      "select",
       text,
     )
     if (selResult.handled) {
@@ -307,12 +303,12 @@ async function processMessage(
     )
 
     if (cmdResult.handled) {
-      // 如果命令返回了新的会话ID，更新 sessions Map
       if (cmdResult.newSessionId) {
         session = { sessionId: cmdResult.newSessionId, userId }
         sessions.set(userId, session)
       }
       
+      console.log(`[发送命令响应] text长度=${(cmdResult.response ?? "").length}`)
       await sendTextMessage({
         to: userId,
         text: cmdResult.response ?? "",
@@ -320,6 +316,7 @@ async function processMessage(
         token: account.token,
         contextToken: msg.context_token ?? "",
       })
+      console.log(`[发送命令响应完成]`)
       return
     }
   } else {
@@ -495,19 +492,12 @@ async function processMessage(
     return
   }
 
-  console.log(`>>> 即将调用 sendTextMessage，文本: ${responseText.slice(0, 50)}...`)
-  
   // 发送响应给微信用户
-  try {
-    await sendTextMessage({
-      to: userId,
-      text: responseText,
-      baseUrl: account.baseUrl,
-      token: account.token,
-      contextToken: msg.context_token,
-    })
-    console.log(`>>> sendTextMessage 调用完成`)
-  } catch (err) {
-    console.error(`>>> sendTextMessage 抛出异常:`, err)
-  }
+  await sendTextMessage({
+    to: userId,
+    text: responseText,
+    baseUrl: account.baseUrl,
+    token: account.token,
+    contextToken: msg.context_token ?? "",
+  })
 }
