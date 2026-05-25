@@ -177,6 +177,9 @@ async function sendTextMessage(params: {
   }
 }
 
+/** 事件消息缓冲，用于流式发送 */
+const eventBuffers = new Map<string, string[]>()
+
 /** 运行机器人 */
 export async function runBot() {
   // 启动 opencode 服务
@@ -199,6 +202,107 @@ export async function runBot() {
 
   // 用户 -> 会话映射
   const sessions = new Map<string, { sessionId: string; userId: string }>()
+
+  // 启动事件订阅，监听 AI 思考和工具调用
+  ;(async () => {
+    try {
+      const events = await opencode.client.event.subscribe()
+      for await (const event of events.stream) {
+        if (event.type === "message.part.updated") {
+          const part = event.properties.part
+          const sessionId = part.sessionID
+          console.log(`[事件] session=${sessionId}, part.type=${part.type}`)
+
+          // 查找这个session对应的用户
+          let targetUserId: string | undefined
+          for (const [userId, session] of sessions.entries()) {
+            if (session.sessionId === sessionId) {
+              targetUserId = userId
+              break
+            }
+          }
+
+          if (!targetUserId) continue
+
+          // 处理不同类型的 parts
+          let text = ""
+          switch (part.type) {
+            case "reasoning":
+              text = `\n🤔 **思考**\n${part.text.slice(-200)}\n`
+              break
+            case "tool":
+              if (part.state.status === "running") {
+                text = `\n🔧 **执行 ${part.tool}**\n`
+                if (part.state.input) {
+                  const inputStr = JSON.stringify(part.state.input)
+                  text += `输入: ${inputStr.length > 100 ? inputStr.slice(0, 100) + "..." : inputStr}\n`
+                }
+              } else if (part.state.status === "completed") {
+                if (part.state.title) {
+                  text = `\n✅ **${part.state.title}**\n`
+                }
+                if (part.state.output) {
+                  const outputStr = typeof part.state.output === "string" ? part.state.output : JSON.stringify(part.state.output)
+                  text += `输出: ${outputStr.length > 200 ? outputStr.slice(0, 200) + "..." : outputStr}\n`
+                }
+              } else if (part.state.status === "error") {
+                text = `\n❌ **工具失败** [${part.tool}]\n${part.state.error || "未知错误"}\n`
+              }
+              break
+            case "text":
+              if (part.text && part.text.trim()) {
+                text = part.text
+              }
+              break
+            default:
+              break
+          }
+
+          if (text) {
+            // 缓冲消息，稍后发送
+            if (!eventBuffers.has(targetUserId)) {
+              eventBuffers.set(targetUserId, [])
+            }
+            eventBuffers.get(targetUserId)!.push(text)
+          }
+        }
+
+        // 监听会话状态变化
+        if (event.type === "session.status") {
+          const sessionId = event.properties.sessionID
+          const status = event.properties.status
+          console.log(`[状态] session=${sessionId}, status=${status}`)
+
+          if (status === "idle") {
+            // AI 完成，发送缓冲的消息
+            for (const [userId, buffer] of eventBuffers.entries()) {
+              if (buffer.length > 0) {
+                const fullText = buffer.join("")
+                console.log(`[发送缓冲消息] user=${userId}, 长度=${fullText.length}`)
+                try {
+                  const session = sessions.get(userId)
+                  if (session) {
+                    await sendTextMessage({
+                      to: userId,
+                      text: fullText,
+                      baseUrl: account.baseUrl,
+                      token: account.token,
+                      contextToken: "",
+                    })
+                  }
+                } catch (e) {
+                  console.error("发送缓冲消息失败:", e)
+                }
+                eventBuffers.set(userId, [])
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("事件订阅失败:", e)
+    }
+  })()
 
   console.log("\n开始监听微信消息...")
 
@@ -431,23 +535,6 @@ async function processMessage(
   }
 
   console.log(`发送prompt到AI: sessionId=${session.sessionId}, parts=${promptBody.parts.length}`)
-  
-  // 先发送一个"正在思考..."的消息，让用户知道AI正在处理
-  let loadingContextToken: string | undefined
-  try {
-    const loadingResult = await sendWechatText({
-      to: userId,
-      text: "🤔 正在思考...",
-      baseUrl: account.baseUrl,
-      token: account.token,
-      contextToken: msg.context_token ?? "",
-    })
-    if (loadingResult && loadingResult.context_token) {
-      loadingContextToken = loadingResult.context_token
-    }
-  } catch (e) {
-    console.log("发送思考中消息失败:", e)
-  }
   
   // 普通消息，发送到 Opencode
   result = await opencode.client.session.prompt({
