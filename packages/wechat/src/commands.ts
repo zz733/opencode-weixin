@@ -197,9 +197,36 @@ export async function handleCommand(ctx: CommandContext, command: string, args: 
     }
   }
 
+  // /new 命令 - 创建新会话
+  if (command === "new" || command === "n") {
+    try {
+      const createResult = await opencode.client.session.create({
+        body: { title: `微信会话 ${new Date().toLocaleString("zh-CN")}` },
+      })
+      
+      if (createResult.error) {
+        return {
+          handled: true,
+          response: `创建新会话失败: ${createResult.error}`,
+        }
+      }
+
+      return {
+        handled: true,
+        response: `✅ 已创建新会话\n会话ID: ${createResult.data.id}`,
+        newSessionId: createResult.data.id,
+      }
+    } catch (err: any) {
+      return {
+        handled: true,
+        response: `创建新会话失败: ${err?.message ?? err}`,
+      }
+    }
+  }
+
   // /cancel 命令
   if (command === "cancel" || command === "c") {
-    clearPendingAction(userId)
+    clearPendingAction(ctx.userId)
     return { handled: true, response: "✅ 已取消当前操作" }
   }
 
@@ -208,6 +235,7 @@ export async function handleCommand(ctx: CommandContext, command: string, args: 
     return {
       handled: true,
       response: `📋 可用命令：
+/new - 创建新会话
 /model - 显示模型列表并选择
 /model <模型名> - 直接切换模型
 /agent - 显示 Agent 列表并选择

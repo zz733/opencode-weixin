@@ -53,7 +53,10 @@ function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean; 
     }
     if (item.type === MessageItemType.IMAGE) {
       const imageUrl = item.image_item?.media?.full_url || item.image_item?.url
-      const imageAesKey = item.image_item?.media?.aes_key || item.image_item?.aeskey
+      // aeskey 优先（hex编码），media.aes_key 是 base64 编码
+      const imageAesKey = item.image_item?.aeskey
+        ? Buffer.from(item.image_item.aeskey, "hex").toString("base64")
+        : item.image_item?.media?.aes_key
       console.log(`图片消息: imageUrl=${imageUrl?.slice(0, 80)}, aesKey=${imageAesKey?.slice(0, 20)}, encrypt_type=${item.image_item?.media?.encrypt_type}`)
       return { text: "[图片消息]", hasMedia: true, imageUrl, imageAesKey }
     }
@@ -69,24 +72,45 @@ function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean; 
 async function downloadImageAsBase64(url: string, aesKey?: string): Promise<{ base64: string; mime: string } | null> {
   try {
     const resp = await fetch(url, { signal: AbortSignal.timeout(15000) })
-    if (!resp.ok) return null
+    if (!resp.ok) {
+      console.log(`图片下载失败: HTTP ${resp.status}`)
+      return null
+    }
     const contentType = resp.headers.get("content-type") || "image/jpeg"
     const mime = contentType.split(";")[0].trim()
     let buffer = Buffer.from(await resp.arrayBuffer())
-    if (buffer.length > 10 * 1024 * 1024) return null
+    console.log(`图片原始大小: ${buffer.length} bytes`)
+
+    if (buffer.length > 10 * 1024 * 1024) {
+      console.log("图片太大，跳过")
+      return null
+    }
 
     if (aesKey) {
       try {
-        const key = Buffer.from(aesKey, "base64")
-        const decipher = crypto.createDecipheriv("aes-256-cbc", key, key.slice(0, 16))
-        buffer = Buffer.concat([decipher.update(buffer), decipher.final()])
-      } catch {
-        // 解密失败，使用原始数据
+        console.log(`开始解密图片，aesKey长度: ${aesKey.length}`)
+        // 微信 CDN 图片使用 AES-128-ECB 解密
+        // aesKey 是 base64 编码，解码后可能是 16 字节原始密钥或 32 字节 hex 字符串
+        let key = Buffer.from(aesKey, "base64")
+        if (key.length === 32 && /^[0-9a-fA-F]{32}$/.test(key.toString("ascii"))) {
+          key = Buffer.from(key.toString("ascii"), "hex")
+        }
+        console.log(`解密密钥长度: ${key.length}, 算法: aes-128-ecb`)
+
+        const decipher = crypto.createDecipheriv("aes-128-ecb", key, null)
+        const decrypted = Buffer.concat([decipher.update(buffer), decipher.final()])
+        buffer = decrypted
+        console.log(`解密成功，解密后大小: ${buffer.length} bytes`)
+      } catch (err) {
+        console.log(`解密失败，使用原始数据: ${err}`)
       }
+    } else {
+      console.log("无AES密钥，使用原始数据")
     }
 
     return { base64: buffer.toString("base64"), mime }
-  } catch {
+  } catch (err) {
+    console.log(`图片下载异常: ${err}`)
     return null
   }
 }
