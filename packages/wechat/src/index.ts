@@ -280,7 +280,7 @@ async function processMessage(
     if (selResult.handled) {
       await sendTextMessage({
         to: userId,
-        text: selResult.response,
+        text: selResult.response ?? "",
         baseUrl: account.baseUrl,
         token: account.token,
         contextToken: msg.context_token ?? "",
@@ -315,7 +315,7 @@ async function processMessage(
       
       await sendTextMessage({
         to: userId,
-        text: cmdResult.response,
+        text: cmdResult.response ?? "",
         baseUrl: account.baseUrl,
         token: account.token,
         contextToken: msg.context_token ?? "",
@@ -335,7 +335,7 @@ async function processMessage(
       if (cmdResult.handled) {
         await sendTextMessage({
           to: userId,
-          text: cmdResult.response,
+          text: cmdResult.response ?? "",
           baseUrl: account.baseUrl,
           token: account.token,
           contextToken: msg.context_token ?? "",
