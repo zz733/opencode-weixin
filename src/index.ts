@@ -442,23 +442,82 @@ async function processMessage(
 
   // 提取 AI 响应内容
   const response = result.data
-  console.log(`响应数据:`, JSON.stringify(response, null, 2).slice(0, 1000))
+  console.log(`响应数据:`, JSON.stringify(response, null, 2).slice(0, 2000))
   
-  // 尝试多种可能的响应格式
-  const textParts = response.parts
-    ?.filter((p: any) => p.type === "text")
-    .map((p: any) => p.text) ?? []
+  // 处理所有类型的 parts，包括 thinking、tool 调用等
+  function processParts(parts: any[]): string {
+    const result: string[] = []
+    for (const part of parts) {
+      switch (part.type) {
+        case "reasoning":
+          result.push(`\n🤔 **思考过程**:\n${part.text}\n`)
+          break
+        case "tool":
+          const toolState = part.state
+          if (toolState) {
+            if (toolState.status === "pending" || toolState.status === "running") {
+              result.push(`\n🔧 **执行工具** [${part.tool}]\n`)
+              if (toolState.input) {
+                result.push(`输入: ${JSON.stringify(toolState.input, null, 2)}\n`)
+              }
+            } else if (toolState.status === "completed") {
+              if (toolState.title) {
+                result.push(`\n✅ **${toolState.title}**\n`)
+              }
+              if (toolState.output) {
+                const output = typeof toolState.output === "string" ? toolState.output : JSON.stringify(toolState.output, null, 2)
+                if (output.length > 500) {
+                  result.push(`输出:\n${output.slice(0, 500)}...\n[内容过长已截断]`)
+                } else {
+                  result.push(`输出:\n${output}\n`)
+                }
+              }
+            } else if (toolState.status === "error") {
+              result.push(`\n❌ **工具执行失败** [${part.tool}]\n${toolState.error}\n`)
+            }
+          }
+          break
+        case "text":
+          if (part.text && part.text.trim().length > 0) {
+            result.push(part.text)
+          }
+          break
+        case "step-start":
+          result.push(`\n────────────────────\n`)
+          break
+        case "step-finish":
+          result.push(`\n────────────────────\n`)
+          break
+        case "subtask":
+          result.push(`\n📋 **子任务**: ${part.description}\n`)
+          result.push(`${part.prompt}\n`)
+          break
+        case "retry":
+          result.push(`\n🔄 **重试** (第 ${part.attempt} 次): ${part.error?.message || "未知错误"}\n`)
+          break
+        default:
+          // 其他类型暂时忽略
+          break
+      }
+    }
+    return result.join("")
+  }
   
-  console.log(`textParts数量: ${textParts.length}`)
-  console.log(`textParts内容:`, textParts)
+  // 提取完整的响应内容
+  let responseText = ""
+  if (response.parts && response.parts.length > 0) {
+    responseText = processParts(response.parts)
+  }
   
-  const responseText =
-    response.info?.content ||
-    response.content ||
-    textParts.join("\n") ||
-    response.message ||
-    response.text ||
-    ""
+  // 如果没有 parts，则尝试旧的格式
+  if (!responseText || responseText.trim().length === 0) {
+    responseText =
+      response.info?.content ||
+      response.content ||
+      response.message ||
+      response.text ||
+      ""
+  }
 
   // 检查是否有错误信息
   const errorMessage = response.info?.error?.data?.message
