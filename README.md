@@ -5,6 +5,7 @@
 ## 功能特性
 
 - 微信官方 ilink API 接入，安全稳定
+- 支持 Windows、macOS、Linux 平台
 - 扫码登录，Token 持久化，自动重连
 - 文本对话、图片识别、语音转文字
 - 多模型切换（/m）、多 Agent 切换（/a）

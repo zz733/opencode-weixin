@@ -17,10 +17,12 @@ import { runBot } from "./index"
 import { startLogin, waitForLogin } from "./auth"
 import fs from "node:fs"
 import path from "node:path"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
+import os from "node:os"
 
 const PID_FILE = path.join(process.cwd(), "opencode-wechat.pid")
 const LOG_FILE = path.join(process.cwd(), "opencode-wechat.log")
+const IS_WINDOWS = process.platform === "win32"
 
 function getPid(): number | null {
   if (!fs.existsSync(PID_FILE)) return null
@@ -28,8 +30,13 @@ function getPid(): number | null {
   const pid = parseInt(pidStr, 10)
   if (isNaN(pid)) return null
   try {
-    process.kill(pid, 0)
-    return pid
+    if (IS_WINDOWS) {
+      const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH"], { encoding: "utf-8" })
+      return result.stdout.includes(pid.toString()) ? pid : null
+    } else {
+      process.kill(pid, 0)
+      return pid
+    }
   } catch {
     return null
   }
@@ -58,7 +65,6 @@ function ensureSingleInstance(): void {
 
 const args = process.argv.slice(2)
 
-// 解析命令行参数
 let serverUrl: string | undefined
 let autoServe = false
 let doLogin = false
@@ -125,9 +131,12 @@ if (stopDaemon) {
   const pid = getPid()
   if (pid) {
     try {
-      process.kill(pid, "SIGTERM")
+      if (IS_WINDOWS) {
+        spawnSync("taskkill", ["/F", "/PID", pid.toString()], { stdio: "ignore" })
+      } else {
+        process.kill(pid, "SIGTERM")
+      }
       console.log(`✅ 已发送停止信号 (PID: ${pid})`)
-      // 等待进程结束
       let waited = 0
       while (getPid() && waited < 5000) {
         await new Promise(resolve => setTimeout(resolve, 100))
@@ -180,7 +189,6 @@ if (doLogin) {
     process.exit(1)
   }
 } else if (daemonMode) {
-  // 后台模式启动
   const existingPid = getPid()
   if (existingPid) {
     console.error(`❌ 服务已在运行 (PID: ${existingPid})`)
@@ -194,16 +202,18 @@ if (doLogin) {
   const child = spawn(process.argv[0], [process.argv[1], ...args.filter(a => a !== "--daemon" && a !== "--log" && a !== logFile)], {
     detached: true,
     stdio: ["ignore", out, err],
-    cwd: process.cwd()
+    cwd: process.cwd(),
+    shell: IS_WINDOWS
   })
 
-  child.unref()
+  if (IS_WINDOWS) {
+    child.unref()
+  }
   console.log(`✅ 服务已启动 (PID: ${child.pid})`)
   console.log(`   日志文件: ${logPath}`)
   console.log(`   查看状态: opencode-wechat --status`)
   console.log(`   停止服务: opencode-wechat --stop`)
 } else {
-  // 前台运行
   ensureSingleInstance()
   runBot().catch((err: unknown) => {
     console.error("❌ 机器人运行失败:", err instanceof Error ? err.message : String(err))
