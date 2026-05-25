@@ -5,6 +5,7 @@
  */
 
 import { createOpencode } from "@opencode-ai/sdk"
+import crypto from "node:crypto"
 import * as WeixinBot from "./api"
 import type { WeixinAccount } from "./api"
 import { sendTextMessage as sendWechatText } from "./messenger"
@@ -37,7 +38,7 @@ function markMessageProcessed(msgId: number): void {
 }
 
 /** 从消息中提取内容（文本或语音转文字） */
-function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean; imageUrl?: string } | undefined {
+function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean; imageUrl?: string; imageAesKey?: string } | undefined {
   if (!msg.item_list?.length) return
 
   for (const item of msg.item_list) {
@@ -52,7 +53,9 @@ function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean; 
     }
     if (item.type === MessageItemType.IMAGE) {
       const imageUrl = item.image_item?.media?.full_url || item.image_item?.url
-      return { text: "[图片消息]", hasMedia: true, imageUrl }
+      const imageAesKey = item.image_item?.media?.aes_key || item.image_item?.aeskey
+      console.log(`图片消息: imageUrl=${imageUrl?.slice(0, 80)}, aesKey=${imageAesKey?.slice(0, 20)}, encrypt_type=${item.image_item?.media?.encrypt_type}`)
+      return { text: "[图片消息]", hasMedia: true, imageUrl, imageAesKey }
     }
     if (item.type === MessageItemType.FILE && item.file_item?.file_name) {
       return { text: `[文件: ${item.file_item.file_name}]`, hasMedia: true }
@@ -63,43 +66,28 @@ function extractContent(msg: WeixinMessage): { text: string; hasMedia: boolean; 
   }
 }
 
-async function downloadImageAsBase64(url: string): Promise<{ base64: string; mime: string } | null> {
+async function downloadImageAsBase64(url: string, aesKey?: string): Promise<{ base64: string; mime: string } | null> {
   try {
     const resp = await fetch(url, { signal: AbortSignal.timeout(15000) })
     if (!resp.ok) return null
     const contentType = resp.headers.get("content-type") || "image/jpeg"
     const mime = contentType.split(";")[0].trim()
-    const buffer = Buffer.from(await resp.arrayBuffer())
+    let buffer = Buffer.from(await resp.arrayBuffer())
     if (buffer.length > 10 * 1024 * 1024) return null
+
+    if (aesKey) {
+      try {
+        const key = Buffer.from(aesKey, "base64")
+        const decipher = crypto.createDecipheriv("aes-256-cbc", key, key.slice(0, 16))
+        buffer = Buffer.concat([decipher.update(buffer), decipher.final()])
+      } catch {
+        // 解密失败，使用原始数据
+      }
+    }
+
     return { base64: buffer.toString("base64"), mime }
   } catch {
     return null
-  }
-}
-
-async function checkModelSupportsImage(opencode: any, prefs: any): Promise<boolean> {
-  try {
-    const providersResp = await opencode.client.config.providers()
-    const providers = providersResp.data?.providers ?? []
-    if (!prefs.model?.providerID || !prefs.model?.modelID) {
-      for (const provider of providers) {
-        const models = provider.models || {}
-        for (const [modelID, modelInfo] of Object.entries(models)) {
-          const info = modelInfo as any
-          if (info.modalities?.input?.includes("image") || info.vision || info.multimodal) {
-            return true
-          }
-        }
-      }
-      return false
-    }
-    const provider = providers.find((p: any) => p.id === prefs.model.providerID)
-    if (!provider) return false
-    const modelInfo = (provider.models || {})[prefs.model.modelID] as any
-    if (!modelInfo) return false
-    return !!(modelInfo.modalities?.input?.includes("image") || modelInfo.vision || modelInfo.multimodal)
-  } catch {
-    return false
   }
 }
 
@@ -385,20 +373,8 @@ async function processMessage(
 
   // 处理图片消息
   if (content.imageUrl) {
-    const supportsImage = await checkModelSupportsImage(opencode, prefs)
-    if (!supportsImage) {
-      await sendTextMessage({
-        to: userId,
-        text: "⚠️ 当前模型不支持图片输入。请使用 /m 切换到支持图片的模型（如 GPT-4o、Claude 等）。",
-        baseUrl: account.baseUrl,
-        token: account.token,
-        contextToken: msg.context_token ?? "",
-      })
-      return
-    }
-
     console.log(`下载图片: ${content.imageUrl.slice(0, 100)}...`)
-    const imageData = await downloadImageAsBase64(content.imageUrl)
+    const imageData = await downloadImageAsBase64(content.imageUrl, content.imageAesKey)
     if (!imageData) {
       await sendTextMessage({
         to: userId,
