@@ -432,6 +432,23 @@ async function processMessage(
 
   console.log(`发送prompt到AI: sessionId=${session.sessionId}, parts=${promptBody.parts.length}`)
   
+  // 先发送一个"正在思考..."的消息，让用户知道AI正在处理
+  let loadingContextToken: string | undefined
+  try {
+    const loadingResult = await sendWechatText({
+      to: userId,
+      text: "🤔 正在思考...",
+      baseUrl: account.baseUrl,
+      token: account.token,
+      contextToken: msg.context_token ?? "",
+    })
+    if (loadingResult && loadingResult.context_token) {
+      loadingContextToken = loadingResult.context_token
+    }
+  } catch (e) {
+    console.log("发送思考中消息失败:", e)
+  }
+  
   // 普通消息，发送到 Opencode
   result = await opencode.client.session.prompt({
     path: { id: session.sessionId },
@@ -595,7 +612,7 @@ async function processMessage(
           text: retryText,
           baseUrl: account.baseUrl,
           token: account.token,
-          contextToken: msg.context_token,
+          contextToken: loadingContextToken || msg.context_token,
         })
         return
       } catch (err) {
@@ -605,7 +622,7 @@ async function processMessage(
           text: `AI处理失败: ${errorMessage}`,
           baseUrl: account.baseUrl,
           token: account.token,
-          contextToken: msg.context_token,
+          contextToken: loadingContextToken || msg.context_token,
         })
         return
       }
@@ -616,7 +633,7 @@ async function processMessage(
       text: `AI处理失败: ${errorMessage}`,
       baseUrl: account.baseUrl,
       token: account.token,
-      contextToken: msg.context_token,
+      contextToken: loadingContextToken || msg.context_token,
     })
     return
   }
@@ -624,6 +641,14 @@ async function processMessage(
   console.log(`响应文本长度: ${responseText.length}`)
   if (!responseText) {
     console.log(`响应文本为空，完整响应:`, JSON.stringify(response, null, 2).slice(0, 2000))
+    // 如果没有响应文本，发送一个简单的完成提示
+    await sendTextMessage({
+      to: userId,
+      text: "✅ 完成",
+      baseUrl: account.baseUrl,
+      token: account.token,
+      contextToken: loadingContextToken || msg.context_token || "",
+    })
     return
   }
 
@@ -633,6 +658,6 @@ async function processMessage(
     text: responseText,
     baseUrl: account.baseUrl,
     token: account.token,
-    contextToken: msg.context_token ?? "",
+    contextToken: loadingContextToken || msg.context_token || "",
   })
 }

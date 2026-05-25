@@ -1,6 +1,6 @@
 {
   "name": "opencode-wechat-bot",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "OpenCode 微信机器人 - 通过官方 ilink API 将 OpenCode 集成到微信",
   "type": "module",
   "license": "MIT",
