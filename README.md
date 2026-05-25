@@ -1,129 +1,108 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">The open source AI coding agent.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+# OpenCode 微信机器人
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
+基于腾讯官方 **ilink API**，将 OpenCode AI 集成到微信，让微信变成你的 AI 助手。
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+## 功能特性
 
----
+- 微信官方 ilink API 接入，安全稳定
+- 扫码登录，Token 持久化，自动重连
+- 文本对话、图片识别、语音转文字
+- 多模型切换（/m）、多 Agent 切换（/a）
+- 后台服务模式运行，日志输出
+- 单实例锁，防止重复启动
+- 长文本自动分段发送
 
-### Installation
+## 安装
 
 ```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
-
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
+npm install -g opencode-wechat-bot
 ```
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+## 快速开始
 
-### Desktop App (BETA)
+### 1. 扫码登录
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
-
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+首次使用需要扫码登录微信：
 
 ```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
+opencode-wechat --login
 ```
 
-#### Installation Directory
+用微信扫描终端显示的二维码，登录成功后账号会自动保存。
 
-The install script respects the following priority order for the installation path:
+### 2. 启动机器人
 
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
+**前台运行**（可看到实时输出）：
 
 ```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+opencode-wechat
 ```
 
-### Agents
+**后台服务模式**（推荐）：
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+```bash
+opencode-wechat --daemon
+```
 
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
+### 3. 管理服务
 
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
+```bash
+opencode-wechat --status          # 查看服务状态
+opencode-wechat --stop            # 停止后台服务
+opencode-wechat --daemon --log /path/to/log.log  # 指定日志文件
+```
 
-Learn more about [agents](https://opencode.ai/docs/agents).
+## 命令列表
 
-### Documentation
+在微信聊天中发送以下命令：
 
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
+| 命令 | 说明 |
+|------|------|
+| `/new` | 创建新会话 |
+| `/m` | 选择模型供应商和模型 |
+| `/a` | 选择 Agent |
+| `/d` | 显示当前工作目录 |
+| `/cd <目录>` | 切换工作目录 |
+| `/s` | 列出所有会话 |
+| `/c` | 取消当前操作 |
+| `/h` | 显示帮助信息 |
 
-### Contributing
+直接发送文字消息即可与 AI 对话，发送图片会自动识别，发送语音会自动转文字。
 
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
+## 命令行选项
 
-### Building on OpenCode
+```
+opencode-wechat                   前台运行
+opencode-wechat --login           扫码登录微信
+opencode-wechat --daemon          后台服务模式启动
+opencode-wechat --stop            停止后台服务
+opencode-wechat --status          查看服务状态
+opencode-wechat --log <file>      指定日志文件（默认 opencode-wechat.log）
+opencode-wechat --url <URL>       连接到已有的 opencode 服务
+opencode-wechat --help            显示帮助信息
+```
 
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+## 环境变量
 
----
+| 变量 | 说明 |
+|------|------|
+| `OPENCODE_API_KEY` | opencode API 密钥（使用 --url 时需要） |
 
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+## 注意事项
+
+- 建议使用新注册的微信小号作为机器人
+- 遵守微信使用条款和相关法律法规
+- 后台模式运行时，日志默认输出到当前目录的 `opencode-wechat.log`
+- 同一目录下只能运行一个实例，重复启动会提示已有进程
+
+## 从源码运行
+
+```bash
+cd packages/wechat
+bun install
+bun run src/cli.ts
+```
+
+## License
+
+MIT
