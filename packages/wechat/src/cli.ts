@@ -12,6 +12,41 @@
 
 import { runBot } from "./index"
 import { startLogin, waitForLogin } from "./auth"
+import fs from "node:fs"
+import path from "node:path"
+
+const PID_FILE = path.join(process.cwd(), "opencode-wechat.pid")
+
+function ensureSingleInstance(): void {
+  if (fs.existsSync(PID_FILE)) {
+    const oldPid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10)
+    if (!isNaN(oldPid)) {
+      try {
+        process.kill(oldPid, 0)
+        console.error(`❌ 已有实例在运行 (PID: ${oldPid})，请先停止后再启动。`)
+        console.error(`   如需强制停止，请执行: kill ${oldPid}`)
+        process.exit(1)
+      } catch {
+        // 旧进程已不存在，清理 PID 文件
+        fs.unlinkSync(PID_FILE)
+      }
+    }
+  }
+
+  fs.writeFileSync(PID_FILE, String(process.pid))
+
+  const cleanup = () => {
+    try { fs.unlinkSync(PID_FILE) } catch {}
+    process.exit(0)
+  }
+  process.on("SIGINT", cleanup)
+  process.on("SIGTERM", cleanup)
+  process.on("exit", () => {
+    try { fs.unlinkSync(PID_FILE) } catch {}
+  })
+}
+
+ensureSingleInstance()
 
 const args = process.argv.slice(2)
 

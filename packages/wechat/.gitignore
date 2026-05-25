@@ -19,3 +19,7 @@ yarn-error.log*
 # IDE
 .vscode
 .idea
+
+# Runtime
+opencode-wechat.pid
+wechat-account.json
