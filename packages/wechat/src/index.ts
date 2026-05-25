@@ -445,7 +445,6 @@ async function processMessage(
         console.log(`重试响应数据:`, JSON.stringify(retryResponse, null, 2).slice(0, 500))
         
         const retryText =
-          retryResponse.info?.content ||
           retryResponse.parts
             ?.filter((p: any) => p.type === "text")
             .map((p: any) => p.text)

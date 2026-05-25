@@ -4,6 +4,7 @@
  */
 
 import crypto from "node:crypto"
+import fs from "node:fs"
 import path from "node:path"
 import type {
   GetUpdatesReq,
@@ -288,7 +289,7 @@ const ACCOUNT_FILE = path.join(process.cwd(), "wechat-account.json")
 
 /** 保存微信账号到文件 */
 export async function saveAccount(account: WeixinAccount): Promise<void> {
-  await Bun.write(ACCOUNT_FILE, JSON.stringify(account, null, 2))
+  fs.writeFileSync(ACCOUNT_FILE, JSON.stringify(account, null, 2))
 }
 
 /** 加载保存的微信账号 */
@@ -305,9 +306,8 @@ export async function loadAccount(): Promise<WeixinAccount | null> {
 
   // 从文件读取
   try {
-    const file = Bun.file(ACCOUNT_FILE)
-    if (await file.exists()) {
-      return await file.json()
+    if (fs.existsSync(ACCOUNT_FILE)) {
+      return JSON.parse(fs.readFileSync(ACCOUNT_FILE, "utf-8"))
     }
   } catch {
     // 文件不存在或读取失败
