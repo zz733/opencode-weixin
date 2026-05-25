@@ -73,7 +73,7 @@ if (doLogin) {
     process.exit(1)
   }
 } else {
-  runBot({ serverUrl, autoServe }).catch((err: unknown) => {
+  runBot().catch((err: unknown) => {
     console.error("❌ 机器人运行失败:", err instanceof Error ? err.message : String(err))
     process.exit(1)
   })
