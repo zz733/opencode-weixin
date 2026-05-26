@@ -23,17 +23,27 @@ import {
   setUserPreference,
 } from "./state"
 
-/** 消息去重：记录已处理的消息 ID */
-const processedMessages = new Set<number>()
+/** 消息去重：记录已处理的消息 ID + 时间戳 */
+const processedMessages = new Map<number, number>()
 function isMessageProcessed(msgId: number): boolean {
-  return processedMessages.has(msgId)
+  const now = Date.now()
+  const msgTime = processedMessages.get(msgId)
+  // 消息 ID 在 5 秒内不重复认为是同一条消息
+  if (msgTime && now - msgTime < 5000) {
+    return true
+  }
+  return false
 }
 function markMessageProcessed(msgId: number): void {
-  processedMessages.add(msgId)
-  // 限制 Set 大小，防止内存泄漏
+  processedMessages.set(msgId, Date.now())
+  // 限制 Map 大小，防止内存泄漏
   if (processedMessages.size > 1000) {
-    const first = processedMessages.values().next().value
-    if (first !== undefined) processedMessages.delete(first)
+    const now = Date.now()
+    for (const [id, time] of processedMessages.entries()) {
+      if (now - time > 5000) {
+        processedMessages.delete(id)
+      }
+    }
   }
 }
 
@@ -203,6 +213,12 @@ export async function runBot() {
   // 用户 -> 会话映射
   const sessions = new Map<string, { sessionId: string; userId: string }>()
 
+  // 用户消息历史（用于上下文压缩）
+  const messageHistory = new Map<string, string[]>()
+
+  // 用户 -> typing_ticket 映射
+  const typingTickets = new Map<string, string>()
+
   // 启动事件订阅，监听 AI 思考和工具调用
   ;(async () => {
     try {
@@ -227,9 +243,6 @@ export async function runBot() {
           // 处理不同类型的 parts
           let text = ""
           switch (part.type) {
-            case "reasoning":
-              text = `🤔 **思考**\n${part.text.slice(-200)}\n`
-              break
             case "tool":
               if (part.state.status === "running") {
                 text = `🔧 **执行 ${part.tool}**\n`
@@ -247,11 +260,6 @@ export async function runBot() {
                 }
               } else if (part.state.status === "error") {
                 text = `❌ **工具失败** [${part.tool}]\n${part.state.error || "未知错误"}\n`
-              }
-              break
-            case "text":
-              if (part.text && part.text.trim()) {
-                text = part.text
               }
               break
             default:
@@ -295,7 +303,7 @@ export async function runBot() {
         baseUrl: account.baseUrl,
         token: account.token,
         get_updates_buf: getUpdatesBuf,
-        timeoutMs: 30000,
+        timeoutMs: 10000,
       })
 
       if (!updates?.msgs?.length) {
@@ -317,7 +325,7 @@ export async function runBot() {
 
       for (const msg of updates.msgs) {
         if (msg.from_user_id?.endsWith("@im.wechat") && msg.message_type !== 2) {
-          await processMessage(msg, account, opencode, sessions)
+          await processMessage(msg, account, opencode, sessions, typingTickets, messageHistory)
         }
       }
     } catch (err: any) {
@@ -337,6 +345,8 @@ async function processMessage(
   account: WeixinAccount,
   opencode: Awaited<ReturnType<typeof createOpencode>>,
   sessions: Map<string, { sessionId: string; userId: string }>,
+  typingTickets: Map<string, string>,
+  messageHistory: Map<string, string[]>,
 ) {
   const userId = msg.from_user_id
   if (!userId) return
@@ -356,43 +366,38 @@ async function processMessage(
 
   console.log(`收到消息 from=${userId}: ${msg.item_list?.[0]?.text_item?.text ?? "[非文本]"}`)
 
+  // 获取 typing_ticket（需要用户的 contextToken）
+  if (!typingTickets.has(userId) && msg.context_token) {
+    try {
+      const configResp = await WeixinBot.getConfig({
+        baseUrl: account.baseUrl,
+        token: account.token,
+        ilinkUserId: userId,
+        contextToken: msg.context_token,
+      })
+      if (configResp.typing_ticket) {
+        typingTickets.set(userId, configResp.typing_ticket)
+        console.log(`✅ 已获取用户 ${userId} 的 typing_ticket`)
+      }
+    } catch (e) {
+      console.log(`获取 typing_ticket 失败:`, e)
+    }
+  }
+
   // 获取或创建会话
   let session = sessions.get(userId)
   if (!session) {
-    // 先尝试获取最后一次会话
-    try {
-      const sessionsResp = await opencode.client.session.list()
-      const existingSessions = sessionsResp.data ?? []
-      
-      if (existingSessions.length > 0) {
-        // 使用最新的会话（按更新时间排序，取最后一个）
-        const lastSession = existingSessions.sort((a: any, b: any) => 
-          (b.time?.updated ?? 0) - (a.time?.updated ?? 0)
-        )[0]
-        
-        if (lastSession) {
-          session = { sessionId: lastSession.id, userId }
-          sessions.set(userId, session)
-          console.log(`使用已有会话: ${session.sessionId} (${lastSession.title || lastSession.id})`)
-        }
-      }
-    } catch (err) {
-      console.error("获取会话列表失败:", err)
+    // 创建新会话
+    const createResult = await opencode.client.session.create({
+      body: { title: `微信用户 ${userId}` },
+    })
+    if (createResult.error) {
+      console.error("创建会话失败:", createResult.error)
+      return
     }
-    
-    // 如果没有找到会话，创建新会话
-    if (!session) {
-      const createResult = await opencode.client.session.create({
-        body: { title: `微信用户 ${userId}` },
-      })
-      if (createResult.error) {
-        console.error("创建会话失败:", createResult.error)
-        return
-      }
-      session = { sessionId: createResult.data.id, userId }
-      sessions.set(userId, session)
-      console.log(`创建新会话: ${session.sessionId}`)
-    }
+    session = { sessionId: createResult.data.id, userId }
+    sessions.set(userId, session)
+    console.log(`创建新会话: ${session.sessionId}`)
   }
 
   // 提取消息内容
@@ -401,6 +406,14 @@ async function processMessage(
 
   const text = content.text.trim()
   if (!text) return
+
+  // 记录用户消息历史（用于上下文压缩）
+  const history = messageHistory.get(userId) || []
+  history.push(`用户: ${text}`)
+  if (history.length > 10) {
+    history.shift()
+  }
+  messageHistory.set(userId, history)
 
   // 检查是否有待处理的交互操作（选择模型/Agent）
   const pending = getPendingAction(userId)
@@ -453,6 +466,13 @@ async function processMessage(
         contextToken: msg.context_token ?? "",
       })
       console.log(`[发送命令响应完成]`)
+      await sendTextMessage({
+        to: userId,
+        text: "✅ 当前命令执行完毕。",
+        baseUrl: account.baseUrl,
+        token: account.token,
+        contextToken: userContextTokens.get(userId) || msg.context_token || "",
+      })
       return
     }
   } else {
@@ -472,6 +492,13 @@ async function processMessage(
           baseUrl: account.baseUrl,
           token: account.token,
           contextToken: msg.context_token ?? "",
+        })
+        await sendTextMessage({
+          to: userId,
+          text: "✅ 当前命令执行完毕。",
+          baseUrl: account.baseUrl,
+          token: account.token,
+          contextToken: userContextTokens.get(userId) || msg.context_token || "",
         })
         return
       }
@@ -520,7 +547,26 @@ async function processMessage(
   }
 
   console.log(`发送prompt到AI: sessionId=${session.sessionId}, parts=${promptBody.parts.length}`)
-  
+
+  // 发送「正在输入」状态
+  const userTypingTicket = typingTickets.get(userId)
+  if (userTypingTicket) {
+    try {
+      await WeixinBot.sendTyping({
+        baseUrl: account.baseUrl,
+        token: account.token,
+        body: {
+          ilink_user_id: userId,
+          typing_ticket: userTypingTicket,
+          status: 1, // 正在输入
+        },
+      })
+      console.log(`已发送「正在输入」状态`)
+    } catch (e) {
+      console.log(`发送「正在输入」失败:`, e)
+    }
+  }
+
   // 普通消息，发送到 Opencode
   result = await opencode.client.session.prompt({
     path: { id: session.sessionId },
@@ -532,61 +578,74 @@ async function processMessage(
   // 提取 AI 响应内容
   const response = result.data
   console.log(`响应数据:`, JSON.stringify(response, null, 2).slice(0, 2000))
-  
-  // 处理所有类型的 parts，包括 thinking、tool 调用等
+
+  // 检查输入 tokens，如果太大则触发上下文压缩
+  const inputTokens = response?.info?.tokens?.input ?? 0
+  if (inputTokens > 50000) {
+    console.log(`输入 tokens 过多 (${inputTokens})，开始压缩上下文...`)
+    
+    // 发送「正在压缩上下文」到微信
+    await sendTextMessage({
+      to: userId,
+      text: "📝 上下文较长，正在压缩历史记录...",
+      baseUrl: account.baseUrl,
+      token: account.token,
+      contextToken: userContextTokens.get(userId) || msg.context_token || "",
+    })
+
+    // 获取消息历史并压缩
+    const history = messageHistory.get(userId) || []
+    if (history.length > 0) {
+      // 用 AI 压缩历史
+      const summaryPrompt = `请用 50-100 字简洁概括以下对话的核心内容（需求、决策、错误等关键信��），不要细节：\n\n${history.join("\n")}`
+      
+      const summaryResult = await opencode.client.session.prompt({
+        path: { id: session.sessionId },
+        body: { parts: [{ type: "text", text: summaryPrompt }] },
+      })
+      
+      const summaryText = (summaryResult.data?.parts?.find((p: any) => p.type === "text") as any)?.text || ""
+      
+      // 创建新会话，把摘要作为背景
+      const createResult = await opencode.client.session.create({
+        body: { title: `微信用户 ${userId}` },
+      })
+      
+      if (!createResult.error) {
+        session = { sessionId: createResult.data.id, userId }
+        sessions.set(userId, session)
+        
+        // 发送摘要到新会话作为背景
+        if (summaryText) {
+          await opencode.client.session.prompt({
+            path: { id: session.sessionId },
+            body: { parts: [{ type: "text", text: `[上下文摘要] ${summaryText}` }] },
+          })
+        }
+        
+        // 清空历史记录
+        messageHistory.set(userId, [])
+        
+        console.log(`上下文已压缩，新会话: ${session.sessionId}`)
+        
+        // 发送「压缩完成」到微信
+        await sendTextMessage({
+          to: userId,
+          text: "✅ 上下文已压缩，继续对话~",
+          baseUrl: account.baseUrl,
+          token: account.token,
+          contextToken: userContextTokens.get(userId) || msg.context_token || "",
+        })
+      }
+    }
+  }
+
+  // 只提取纯文本响应内容
   function processParts(parts: any[]): string {
     const result: string[] = []
     for (const part of parts) {
-      switch (part.type) {
-        case "reasoning":
-          result.push(`\n🤔 **思考过程**:\n${part.text}\n`)
-          break
-        case "tool":
-          const toolState = part.state
-          if (toolState) {
-            if (toolState.status === "pending" || toolState.status === "running") {
-              result.push(`\n🔧 **执行工具** [${part.tool}]\n`)
-              if (toolState.input) {
-                result.push(`输入: ${JSON.stringify(toolState.input, null, 2)}\n`)
-              }
-            } else if (toolState.status === "completed") {
-              if (toolState.title) {
-                result.push(`\n✅ **${toolState.title}**\n`)
-              }
-              if (toolState.output) {
-                const output = typeof toolState.output === "string" ? toolState.output : JSON.stringify(toolState.output, null, 2)
-                if (output.length > 500) {
-                  result.push(`输出:\n${output.slice(0, 500)}...\n[内容过长已截断]`)
-                } else {
-                  result.push(`输出:\n${output}\n`)
-                }
-              }
-            } else if (toolState.status === "error") {
-              result.push(`\n❌ **工具执行失败** [${part.tool}]\n${toolState.error}\n`)
-            }
-          }
-          break
-        case "text":
-          if (part.text && part.text.trim().length > 0) {
-            result.push(part.text)
-          }
-          break
-        case "step-start":
-          result.push(`\n────────────────────\n`)
-          break
-        case "step-finish":
-          result.push(`\n────────────────────\n`)
-          break
-        case "subtask":
-          result.push(`\n📋 **子任务**: ${part.description}\n`)
-          result.push(`${part.prompt}\n`)
-          break
-        case "retry":
-          result.push(`\n🔄 **重试** (第 ${part.attempt} 次): ${part.error?.message || "未知错误"}\n`)
-          break
-        default:
-          // 其他类型暂时忽略
-          break
+      if (part.type === "text" && part.text && part.text.trim().length > 0) {
+        result.push(part.text)
       }
     }
     return result.join("")
@@ -725,11 +784,35 @@ async function processMessage(
   }
 
   // 发送响应给微信用户
-  await sendTextMessage({
-    to: userId,
-    text: responseText,
-    baseUrl: account.baseUrl,
-    token: account.token,
-    contextToken: userContextTokens.get(userId) || msg.context_token || "",
-  })
+  console.log(`准备发送响应到微信: userId=${userId}, text="${responseText}"`)
+  try {
+    const result = await sendTextMessage({
+      to: userId,
+      text: responseText,
+      baseUrl: account.baseUrl,
+      token: account.token,
+      contextToken: userContextTokens.get(userId) || msg.context_token || "",
+    })
+    console.log(`响应发送完成:`, result)
+  } catch (e) {
+    console.error(`发送响应失败:`, e)
+  }
+
+  // 发送「取消输入」状态
+  if (userTypingTicket) {
+    try {
+      await WeixinBot.sendTyping({
+        baseUrl: account.baseUrl,
+        token: account.token,
+        body: {
+          ilink_user_id: userId,
+          typing_ticket: userTypingTicket,
+          status: 2, // 取消输入
+        },
+      })
+      console.log(`已发送「取消输入」状态`)
+    } catch (e) {
+      console.log(`发送「取消输入」失败:`, e)
+    }
+  }
 }
