@@ -58,7 +58,7 @@ export async function sendTextMessage(params: {
   baseUrl: string
   token?: string
   contextToken?: string
-}): Promise<string> {
+}): Promise<{ context_token?: string }> {
   const clientId = generateClientId()
   const text = markdownToPlainText(params.text)
   const req = buildTextMessage({
@@ -74,5 +74,5 @@ export async function sendTextMessage(params: {
     body: req,
   })
 
-  return clientId
+  return {}
 }

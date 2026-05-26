@@ -16,6 +16,7 @@
 import { runBot } from "./index"
 import { startLogin, waitForLogin } from "./auth"
 import QRCode from "qrcode"
+import type QRCodeType from "qrcode"
 import fs from "node:fs"
 import path from "node:path"
 import { spawn, spawnSync } from "node:child_process"
@@ -197,7 +198,7 @@ if (doLogin) {
         errorCorrectionLevel: "M",
         margin: 4,
       })
-      const lines = qrTerminal.split("\n").filter(l => l.trim())
+      const lines = qrTerminal.split("\n").filter((l: string) => l.trim())
       const termWidth = process.stdout.columns || 80
       const qrWidth = lines[0]?.length ?? 0
       const padLeft = Math.max(0, Math.floor((termWidth - qrWidth) / 2))
