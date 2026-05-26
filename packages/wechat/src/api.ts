@@ -5,6 +5,7 @@
 
 import crypto from "node:crypto"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import type {
   GetUpdatesReq,
@@ -285,16 +286,23 @@ export interface WeixinAccount {
   userId?: string
 }
 
-const ACCOUNT_FILE = path.join(process.cwd(), "wechat-account.json")
+const CONFIG_DIR = path.join(os.homedir(), ".opencode-wechat")
+const ACCOUNT_FILE = path.join(CONFIG_DIR, "account.json")
+
+function ensureConfigDir(): void {
+  if (!fs.existsSync(CONFIG_DIR)) {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  }
+}
 
 /** 保存微信账号到文件 */
 export async function saveAccount(account: WeixinAccount): Promise<void> {
+  ensureConfigDir()
   fs.writeFileSync(ACCOUNT_FILE, JSON.stringify(account, null, 2))
 }
 
 /** 加载保存的微信账号 */
 export async function loadAccount(): Promise<WeixinAccount | null> {
-  // 优先从环境变量读取
   const accountData = process.env.WEIXIN_ACCOUNT
   if (accountData) {
     try {
@@ -304,13 +312,11 @@ export async function loadAccount(): Promise<WeixinAccount | null> {
     }
   }
 
-  // 从文件读取
   try {
     if (fs.existsSync(ACCOUNT_FILE)) {
       return JSON.parse(fs.readFileSync(ACCOUNT_FILE, "utf-8"))
     }
   } catch {
-    // 文件不存在或读取失败
   }
 
   return null

@@ -15,27 +15,46 @@
 
 import { runBot } from "./index"
 import { startLogin, waitForLogin } from "./auth"
+import QRCode from "qrcode"
 import fs from "node:fs"
 import path from "node:path"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
+import os from "node:os"
 
-const PID_FILE = path.join(process.cwd(), "opencode-wechat.pid")
-const LOG_FILE = path.join(process.cwd(), "opencode-wechat.log")
+const CONFIG_DIR = path.join(os.homedir(), ".opencode-wechat")
+const PID_FILE = path.join(CONFIG_DIR, "opencode-wechat.pid")
+const LOG_FILE = path.join(CONFIG_DIR, "opencode-wechat.log")
+const IS_WINDOWS = process.platform === "win32"
+
+function ensureConfigDir(): void {
+  if (!fs.existsSync(CONFIG_DIR)) {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  }
+}
 
 function getPid(): number | null {
   if (!fs.existsSync(PID_FILE)) return null
   const pidStr = fs.readFileSync(PID_FILE, "utf-8").trim()
   const pid = parseInt(pidStr, 10)
-  if (isNaN(pid)) return null
-  try {
-    process.kill(pid, 0)
-    return pid
-  } catch {
+  if (isNaN(pid)) {
+    try { fs.unlinkSync(PID_FILE) } catch {}
     return null
   }
+  try {
+    if (IS_WINDOWS) {
+      const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH"], { encoding: "utf-8" })
+      if (result.stdout.includes(pid.toString())) return pid
+    } else {
+      process.kill(pid, 0)
+      return pid
+    }
+  } catch {}
+  try { fs.unlinkSync(PID_FILE) } catch {}
+  return null
 }
 
 function ensureSingleInstance(): void {
+  ensureConfigDir()
   const existingPid = getPid()
   if (existingPid) {
     console.error(`❌ 已有实例在运行 (PID: ${existingPid})，请先停止后再启动。`)
@@ -58,7 +77,6 @@ function ensureSingleInstance(): void {
 
 const args = process.argv.slice(2)
 
-// 解析命令行参数
 let serverUrl: string | undefined
 let autoServe = false
 let doLogin = false
@@ -125,9 +143,12 @@ if (stopDaemon) {
   const pid = getPid()
   if (pid) {
     try {
-      process.kill(pid, "SIGTERM")
+      if (IS_WINDOWS) {
+        spawnSync("taskkill", ["/F", "/PID", pid.toString()], { stdio: "ignore" })
+      } else {
+        process.kill(pid, "SIGTERM")
+      }
       console.log(`✅ 已发送停止信号 (PID: ${pid})`)
-      // 等待进程结束
       let waited = 0
       while (getPid() && waited < 5000) {
         await new Promise(resolve => setTimeout(resolve, 100))
@@ -163,24 +184,52 @@ if (statusOnly) {
 }
 
 if (doLogin) {
+  ensureConfigDir()
   console.log("正在获取登录二维码...")
   const result = await startLogin({ force: true })
   if (result.qrcodeUrl) {
     console.log("\n请用微信扫描以下二维码登录：")
-    console.log(result.qrcodeUrl)
+
+    try {
+      const qrTerminal = await QRCode.toString(result.qrcodeUrl, {
+        type: "terminal",
+        small: false,
+        errorCorrectionLevel: "M",
+        margin: 4,
+      })
+      const lines = qrTerminal.split("\n").filter(l => l.trim())
+      const termWidth = process.stdout.columns || 80
+      const qrWidth = lines[0]?.length ?? 0
+      const padLeft = Math.max(0, Math.floor((termWidth - qrWidth) / 2))
+      const padStr = " ".repeat(padLeft)
+      console.log("")
+      console.log("")
+      for (const line of lines) {
+        console.log(padStr + line)
+      }
+      console.log("")
+      console.log("")
+    } catch {
+      console.log(result.qrcodeUrl)
+    }
+
+    console.log(`二维码链接: ${result.qrcodeUrl}`)
+  } else {
+    console.log("\n❌ 获取二维码失败:", result.message)
+    process.exit(1)
   }
 
   console.log("\n等待扫码确认...")
   const waitResult = await waitForLogin({ sessionKey: result.sessionKey, timeoutMs: 300000 })
 
   if (waitResult.connected) {
-    console.log("\n✅ 登录成功！账号已保存到 wechat-account.json")
+    console.log(`\n✅ 登录成功！账号已保存到 ${path.join(CONFIG_DIR, "account.json")}`)
   } else {
     console.log("\n❌ 登录失败:", waitResult.message)
     process.exit(1)
   }
 } else if (daemonMode) {
-  // 后台模式启动
+  ensureConfigDir()
   const existingPid = getPid()
   if (existingPid) {
     console.error(`❌ 服务已在运行 (PID: ${existingPid})`)
@@ -194,16 +243,18 @@ if (doLogin) {
   const child = spawn(process.argv[0], [process.argv[1], ...args.filter(a => a !== "--daemon" && a !== "--log" && a !== logFile)], {
     detached: true,
     stdio: ["ignore", out, err],
-    cwd: process.cwd()
+    cwd: process.cwd(),
+    shell: IS_WINDOWS
   })
 
-  child.unref()
+  if (IS_WINDOWS) {
+    child.unref()
+  }
   console.log(`✅ 服务已启动 (PID: ${child.pid})`)
   console.log(`   日志文件: ${logPath}`)
   console.log(`   查看状态: opencode-wechat --status`)
   console.log(`   停止服务: opencode-wechat --stop`)
 } else {
-  // 前台运行
   ensureSingleInstance()
   runBot().catch((err: unknown) => {
     console.error("❌ 机器人运行失败:", err instanceof Error ? err.message : String(err))

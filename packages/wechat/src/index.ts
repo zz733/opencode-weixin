@@ -177,6 +177,9 @@ async function sendTextMessage(params: {
   }
 }
 
+/** 每个用户的最新 contextToken，用于连续发送多个消息 */
+const userContextTokens = new Map<string, string>()
+
 /** 运行机器人 */
 export async function runBot() {
   // 启动 opencode 服务
@@ -199,6 +202,87 @@ export async function runBot() {
 
   // 用户 -> 会话映射
   const sessions = new Map<string, { sessionId: string; userId: string }>()
+
+  // 启动事件订阅，监听 AI 思考和工具调用
+  ;(async () => {
+    try {
+      const events = await opencode.client.event.subscribe()
+      for await (const event of events.stream) {
+        if (event.type === "message.part.updated") {
+          const part = event.properties.part
+          const sessionId = part.sessionID
+          console.log(`[事件] session=${sessionId}, part.type=${part.type}`)
+
+          // 查找这个session对应的用户
+          let targetUserId: string | undefined
+          for (const [userId, session] of sessions.entries()) {
+            if (session.sessionId === sessionId) {
+              targetUserId = userId
+              break
+            }
+          }
+
+          if (!targetUserId) continue
+
+          // 处理不同类型的 parts
+          let text = ""
+          switch (part.type) {
+            case "reasoning":
+              text = `🤔 **思考**\n${part.text.slice(-200)}\n`
+              break
+            case "tool":
+              if (part.state.status === "running") {
+                text = `🔧 **执行 ${part.tool}**\n`
+                if (part.state.input) {
+                  const inputStr = JSON.stringify(part.state.input)
+                  text += `输入: ${inputStr.length > 100 ? inputStr.slice(0, 100) + "..." : inputStr}\n`
+                }
+              } else if (part.state.status === "completed") {
+                if (part.state.title) {
+                  text = `✅ **${part.state.title}**\n`
+                }
+                if (part.state.output) {
+                  const outputStr = typeof part.state.output === "string" ? part.state.output : JSON.stringify(part.state.output)
+                  text += `输出: ${outputStr.length > 200 ? outputStr.slice(0, 200) + "..." : outputStr}\n`
+                }
+              } else if (part.state.status === "error") {
+                text = `❌ **工具失败** [${part.tool}]\n${part.state.error || "未知错误"}\n`
+              }
+              break
+            case "text":
+              if (part.text && part.text.trim()) {
+                text = part.text
+              }
+              break
+            default:
+              break
+          }
+
+          if (text) {
+            // 立即发送消息到微信
+            console.log(`[立即发送] user=${targetUserId}, type=${part.type}`)
+            try {
+              const lastContext = userContextTokens.get(targetUserId) || ""
+              const result = await sendWechatText({
+                to: targetUserId,
+                text: text,
+                baseUrl: account.baseUrl,
+                token: account.token,
+                contextToken: lastContext,
+              })
+              if (result && result.context_token) {
+                userContextTokens.set(targetUserId, result.context_token)
+              }
+            } catch (e) {
+              console.error("发送事件消息失败:", e)
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("事件订阅失败:", e)
+    }
+  })()
 
   console.log("\n开始监听微信消息...")
 
@@ -256,6 +340,11 @@ async function processMessage(
 ) {
   const userId = msg.from_user_id
   if (!userId) return
+  
+  // 更新 contextToken 以便后续消息能正确跟进
+  if (msg.context_token) {
+    userContextTokens.set(userId, msg.context_token)
+  }
 
   // 消息去重
   if (msg.message_id !== undefined) {
@@ -442,23 +531,82 @@ async function processMessage(
 
   // 提取 AI 响应内容
   const response = result.data
-  console.log(`响应数据:`, JSON.stringify(response, null, 2).slice(0, 1000))
+  console.log(`响应数据:`, JSON.stringify(response, null, 2).slice(0, 2000))
   
-  // 尝试多种可能的响应格式
-  const textParts = response.parts
-    ?.filter((p: any) => p.type === "text")
-    .map((p: any) => p.text) ?? []
+  // 处理所有类型的 parts，包括 thinking、tool 调用等
+  function processParts(parts: any[]): string {
+    const result: string[] = []
+    for (const part of parts) {
+      switch (part.type) {
+        case "reasoning":
+          result.push(`\n🤔 **思考过程**:\n${part.text}\n`)
+          break
+        case "tool":
+          const toolState = part.state
+          if (toolState) {
+            if (toolState.status === "pending" || toolState.status === "running") {
+              result.push(`\n🔧 **执行工具** [${part.tool}]\n`)
+              if (toolState.input) {
+                result.push(`输入: ${JSON.stringify(toolState.input, null, 2)}\n`)
+              }
+            } else if (toolState.status === "completed") {
+              if (toolState.title) {
+                result.push(`\n✅ **${toolState.title}**\n`)
+              }
+              if (toolState.output) {
+                const output = typeof toolState.output === "string" ? toolState.output : JSON.stringify(toolState.output, null, 2)
+                if (output.length > 500) {
+                  result.push(`输出:\n${output.slice(0, 500)}...\n[内容过长已截断]`)
+                } else {
+                  result.push(`输出:\n${output}\n`)
+                }
+              }
+            } else if (toolState.status === "error") {
+              result.push(`\n❌ **工具执行失败** [${part.tool}]\n${toolState.error}\n`)
+            }
+          }
+          break
+        case "text":
+          if (part.text && part.text.trim().length > 0) {
+            result.push(part.text)
+          }
+          break
+        case "step-start":
+          result.push(`\n────────────────────\n`)
+          break
+        case "step-finish":
+          result.push(`\n────────────────────\n`)
+          break
+        case "subtask":
+          result.push(`\n📋 **子任务**: ${part.description}\n`)
+          result.push(`${part.prompt}\n`)
+          break
+        case "retry":
+          result.push(`\n🔄 **重试** (第 ${part.attempt} 次): ${part.error?.message || "未知错误"}\n`)
+          break
+        default:
+          // 其他类型暂时忽略
+          break
+      }
+    }
+    return result.join("")
+  }
   
-  console.log(`textParts数量: ${textParts.length}`)
-  console.log(`textParts内容:`, textParts)
+  // 提取完整的响应内容
+  let responseText = ""
+  if (response.parts && response.parts.length > 0) {
+    responseText = processParts(response.parts)
+  }
   
-  const responseText =
-    response.info?.content ||
-    response.content ||
-    textParts.join("\n") ||
-    response.message ||
-    response.text ||
-    ""
+  // 如果没有 parts，则尝试旧的格式
+  if (!responseText || responseText.trim().length === 0) {
+    responseText =
+      response.info?.content ||
+      response.content ||
+      response.message ||
+      response.text ||
+      ""
+  }
 
   // 检查是否有错误信息
   const errorMessage = response.info?.error?.data?.message
@@ -536,7 +684,7 @@ async function processMessage(
           text: retryText,
           baseUrl: account.baseUrl,
           token: account.token,
-          contextToken: msg.context_token,
+          contextToken: userContextTokens.get(userId) || msg.context_token || "",
         })
         return
       } catch (err) {
@@ -546,7 +694,7 @@ async function processMessage(
           text: `AI处理失败: ${errorMessage}`,
           baseUrl: account.baseUrl,
           token: account.token,
-          contextToken: msg.context_token,
+          contextToken: userContextTokens.get(userId) || msg.context_token || "",
         })
         return
       }
@@ -557,7 +705,7 @@ async function processMessage(
       text: `AI处理失败: ${errorMessage}`,
       baseUrl: account.baseUrl,
       token: account.token,
-      contextToken: msg.context_token,
+      contextToken: userContextTokens.get(userId) || msg.context_token || "",
     })
     return
   }
@@ -565,6 +713,14 @@ async function processMessage(
   console.log(`响应文本长度: ${responseText.length}`)
   if (!responseText) {
     console.log(`响应文本为空，完整响应:`, JSON.stringify(response, null, 2).slice(0, 2000))
+    // 如果没有响应文本，发送一个简单的完成提示
+    await sendTextMessage({
+      to: userId,
+      text: "✅ 完成",
+      baseUrl: account.baseUrl,
+      token: account.token,
+      contextToken: userContextTokens.get(userId) || msg.context_token || "",
+    })
     return
   }
 
@@ -574,6 +730,6 @@ async function processMessage(
     text: responseText,
     baseUrl: account.baseUrl,
     token: account.token,
-    contextToken: msg.context_token ?? "",
+    contextToken: userContextTokens.get(userId) || msg.context_token || "",
   })
 }
