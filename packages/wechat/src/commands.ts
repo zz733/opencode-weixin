@@ -3,7 +3,7 @@
  */
 
 import { sendTextMessage } from "./messenger"
-import { setPendingAction, getPendingAction, clearPendingAction, setUserPreference } from "./state"
+import { setPendingAction, getPendingAction, clearPendingAction, setUserPreference, setUserDirectory } from "./state"
 import type { WeixinAccount } from "./auth"
 import type { WeixinMessage } from "./types"
 
@@ -111,6 +111,46 @@ export async function handlePendingSelection(ctx: CommandContext, text: string):
       handled: true,
       response: `✅ 已切换到会话: ${selected.title}\n目录: ${selected.directory}`,
       newSessionId: selected.id,
+    }
+  }
+
+  if (pending.type === "select-project") {
+    if (isNaN(num) || num < 1 || num > pending.projects.length) {
+      return {
+        handled: true,
+        response: `请输入 1-${pending.projects.length} 之间的数字，或 0 取消`,
+      }
+    }
+    const selected = pending.projects[num - 1]
+    clearPendingAction(ctx.userId)
+
+    // 保存用户选择的项目目录
+    setUserDirectory(ctx.userId, selected.directory)
+
+    // 创建新会话
+    try {
+      const createResult = await ctx.opencode.client.session.create({
+        query: { directory: selected.directory },
+        body: { title: `微信用户 ${ctx.userId} - ${selected.title}` },
+      })
+      
+      if (createResult.error) {
+        return {
+          handled: true,
+          response: `切换项目失败: ${createResult.error}`,
+        }
+      }
+
+      return {
+        handled: true,
+        response: `✅ 已切换到项目: ${selected.title}\n目录: ${selected.directory}`,
+        newSessionId: createResult.data.id,
+      }
+    } catch (err: any) {
+      return {
+        handled: true,
+        response: `切换项目失败: ${err?.message ?? err}`,
+      }
     }
   }
 
@@ -240,6 +280,7 @@ export async function handleCommand(ctx: CommandContext, command: string, args: 
 /model <模型名> - 直接切换模型
 /agent - 显示 Agent 列表并选择
 /agent <Agent名> - 直接切换 Agent
+/project - 显示项目列表并选择
 /dir - 显示当前目录
 /cd <目录> - 切换目录
 /sessions - 列出所有会话
@@ -266,7 +307,10 @@ export async function handleCommand(ctx: CommandContext, command: string, args: 
   /agent - 显示 Agent 列表并选择
   /a - /agent 的简写
 
-📁 目录/会话相关：
+📁 项目/目录相关：
+  /project - 显示项目列表并选择
+  /p - /project 的简写
+  /项目 - 中文别名
   /dir - 显示当前目录
   /cd <目录> - 切换目录
   /sessions - 列出所有会话
@@ -366,6 +410,66 @@ export async function handleCommand(ctx: CommandContext, command: string, args: 
       return {
         handled: true,
         response: `切换目录失败: ${err?.message ?? err}`,
+      }
+    }
+  }
+
+  // 简化路径显示
+  function shortenPath(path: string): string {
+    const home = process.env.HOME || ""
+    if (home && path.startsWith(home)) {
+      return "~" + path.slice(home.length)
+    }
+    // 只显示最后2级目录
+    const parts = path.split("/").filter(Boolean)
+    if (parts.length > 2) {
+      return ".../" + parts.slice(-2).join("/")
+    }
+    return path
+  }
+
+  // 从路径提取项目名
+  function getProjectName(worktree: string): string {
+    const home = process.env.HOME || ""
+    let path = worktree
+    if (home && path.startsWith(home)) {
+      path = "~" + path.slice(home.length)
+    }
+    const parts = path.split("/").filter(Boolean)
+    return parts[parts.length - 1] || "未命名"
+  }
+
+  // /project 命令 - 选择项目
+  if (command === "project" || command === "p" || command === "项目") {
+    try {
+      const projectsResp = await opencode.client.project.list()
+      const projects = projectsResp.data ?? []
+      
+      if (projects.length === 0) {
+        return { handled: true, response: "暂无可用项目" }
+      }
+
+      const projectList = projects.slice(0, 20).map((p: any, i: number) => 
+        `${i + 1}. ${getProjectName(p.worktree)}\n   📁 ${shortenPath(p.worktree)}`
+      ).join("\n")
+
+      setPendingAction(userId, {
+        type: "select-project",
+        projects: projects.slice(0, 20).map((p: any) => ({
+          id: p.id,
+          title: getProjectName(p.worktree),
+          directory: p.worktree,
+        })),
+      })
+
+      return {
+        handled: true,
+        response: `📋 请选择项目（输入数字，0 取消）：\n${projectList}`,
+      }
+    } catch (err: any) {
+      return {
+        handled: true,
+        response: `获取项目列表失败: ${err?.message ?? err}`,
       }
     }
   }

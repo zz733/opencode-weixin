@@ -18,30 +18,33 @@ import {
   getContextToken,
   getPendingAction,
   getUserPreferences,
+  getUserDirectory,
   saveContextToken,
   setPendingAction,
   setUserPreference,
 } from "./state"
 
-/** 消息去重：记录已处理的消息 ID + 时间戳 */
-const processedMessages = new Map<number, number>()
-function isMessageProcessed(msgId: number): boolean {
+/** 消息去重：记录已处理的消息 ID + 时间戳 + 用户 ID 组合 */
+const processedMessages = new Map<string, number>()
+function isMessageProcessed(msgId: number, userId: string): boolean {
+  const key = `${msgId}-${userId}`
   const now = Date.now()
-  const msgTime = processedMessages.get(msgId)
-  // 消息 ID 在 5 秒内不重复认为是同一条消息
-  if (msgTime && now - msgTime < 5000) {
+  const msgTime = processedMessages.get(key)
+  // 消息 ID 在 30 秒内不重复认为是同一条消息
+  if (msgTime && now - msgTime < 30000) {
     return true
   }
   return false
 }
-function markMessageProcessed(msgId: number): void {
-  processedMessages.set(msgId, Date.now())
+function markMessageProcessed(msgId: number, userId: string): void {
+  const key = `${msgId}-${userId}`
+  processedMessages.set(key, Date.now())
   // 限制 Map 大小，防止内存泄漏
   if (processedMessages.size > 1000) {
     const now = Date.now()
-    for (const [id, time] of processedMessages.entries()) {
-      if (now - time > 5000) {
-        processedMessages.delete(id)
+    for (const [key, time] of processedMessages.entries()) {
+      if (now - time > 30000) {
+        processedMessages.delete(key)
       }
     }
   }
@@ -303,7 +306,7 @@ export async function runBot() {
         baseUrl: account.baseUrl,
         token: account.token,
         get_updates_buf: getUpdatesBuf,
-        timeoutMs: 10000,
+        timeoutMs: 30000,
       })
 
       if (!updates?.msgs?.length) {
@@ -329,12 +332,14 @@ export async function runBot() {
         }
       }
     } catch (err: any) {
-      // 忽略网络超时等常见错误
       const msg = err?.message ?? ""
-      if (msg.includes("timeout") || msg.includes("ETIMEDOUT")) continue
+      const code = err?.cause?.code ?? ""
+      // 长轮询网络超时，立即重试
+      if (msg.includes("timeout") || msg.includes("ETIMEDOUT") || code === "UND_ERR_HEADERS_TIMEOUT") {
+        continue
+      }
       console.error("轮询消息失败:", err)
-      // 等待一段时间后重试
-      await new Promise((r) => setTimeout(r, 5000))
+      await new Promise((r) => setTimeout(r, 2000))
     }
   }
 }
@@ -358,10 +363,11 @@ async function processMessage(
 
   // 消息去重
   if (msg.message_id !== undefined) {
-    if (isMessageProcessed(msg.message_id)) {
+    if (isMessageProcessed(msg.message_id, userId)) {
+      console.log(`消息已处理过，跳过: msgId=${msg.message_id}, userId=${userId}`)
       return
     }
-    markMessageProcessed(msg.message_id)
+    markMessageProcessed(msg.message_id, userId)
   }
 
   console.log(`收到消息 from=${userId}: ${msg.item_list?.[0]?.text_item?.text ?? "[非文本]"}`)
@@ -423,6 +429,10 @@ async function processMessage(
       text,
     )
     if (selResult.handled) {
+      if (selResult.newSessionId) {
+        session = { sessionId: selResult.newSessionId, userId }
+        sessions.set(userId, session)
+      }
       await sendTextMessage({
         to: userId,
         text: selResult.response ?? "",
@@ -567,16 +577,23 @@ async function processMessage(
     }
   }
 
-  // 普通消息，发送到 Opencode
-  result = await opencode.client.session.prompt({
+  // 构造 prompt 参数，带上用户选择的目录
+  const promptParams: any = {
     path: { id: session.sessionId },
     body: promptBody,
-  })
+  }
+  const userDir = getUserDirectory(userId)
+  if (userDir) {
+    promptParams.query = { directory: userDir }
+  }
+
+  // 普通消息，发送到 Opencode
+  result = await opencode.client.session.prompt(promptParams)
   
   console.log(`AI响应: error=${result.error ? 'yes' : 'no'}`)
 
   // 提取 AI 响应内容
-  const response = result.data
+  let response = result.data
   console.log(`响应数据:`, JSON.stringify(response, null, 2).slice(0, 2000))
 
   // 检查输入 tokens，如果太大则触发上下文压缩
@@ -599,28 +616,44 @@ async function processMessage(
       // 用 AI 压缩历史
       const summaryPrompt = `请用 50-100 字简洁概括以下对话的核心内容（需求、决策、错误等关键信��），不要细节：\n\n${history.join("\n")}`
       
-      const summaryResult = await opencode.client.session.prompt({
+      const summaryPromptParams: any = {
         path: { id: session.sessionId },
         body: { parts: [{ type: "text", text: summaryPrompt }] },
-      })
+      }
+      const userDir = getUserDirectory(userId)
+      if (userDir) {
+        summaryPromptParams.query = { directory: userDir }
+      }
+      const summaryResult = await opencode.client.session.prompt(summaryPromptParams)
       
       const summaryText = (summaryResult.data?.parts?.find((p: any) => p.type === "text") as any)?.text || ""
       
       // 创建新会话，把摘要作为背景
-      const createResult = await opencode.client.session.create({
+      const createParams: any = {
         body: { title: `微信用户 ${userId}` },
-      })
+      }
+      if (userDir) {
+        createParams.query = { directory: userDir }
+      }
+      const createResult = await opencode.client.session.create(createParams)
       
       if (!createResult.error) {
         session = { sessionId: createResult.data.id, userId }
         sessions.set(userId, session)
         
-        // 发送摘要到新会话作为背景
+        // 发送摘要到新会话作为背景（noReply: true 不产生 AI 响应）
         if (summaryText) {
-          await opencode.client.session.prompt({
+          const backgroundPromptParams: any = {
             path: { id: session.sessionId },
-            body: { parts: [{ type: "text", text: `[上下文摘要] ${summaryText}` }] },
-          })
+            body: { 
+              parts: [{ type: "text", text: `[上下文摘要] ${summaryText}` }],
+              noReply: true,
+            },
+          }
+          if (userDir) {
+            backgroundPromptParams.query = { directory: userDir }
+          }
+          await opencode.client.session.prompt(backgroundPromptParams)
         }
         
         // 清空历史记录
@@ -628,14 +661,36 @@ async function processMessage(
         
         console.log(`上下文已压缩，新会话: ${session.sessionId}`)
         
-        // 发送「压缩完成」到微信
-        await sendTextMessage({
-          to: userId,
-          text: "✅ 上下文已压缩，继续对话~",
-          baseUrl: account.baseUrl,
-          token: account.token,
-          contextToken: userContextTokens.get(userId) || msg.context_token || "",
-        })
+        // 把用户原始消息发送到新 session
+        const retryBody: any = { parts: [{ type: "text", text }] }
+        if (prefs.model) retryBody.model = prefs.model
+        if (prefs.agent) retryBody.agent = prefs.agent
+        
+        const retryParams: any = {
+          path: { id: session.sessionId },
+          body: retryBody,
+        }
+        if (userDir) {
+          retryParams.query = { directory: userDir }
+        }
+        const retryResult = await opencode.client.session.prompt(retryParams)
+        
+        if (!retryResult.error && retryResult.data) {
+          // 用新的响应替换原来的 response
+          result = retryResult
+          response = retryResult.data
+          console.log(`用户消息已在新会话中重新处理`)
+        } else {
+          // 重试失败，发送提示
+          await sendTextMessage({
+            to: userId,
+            text: "✅ 上下文已压缩，请重新发送消息~",
+            baseUrl: account.baseUrl,
+            token: account.token,
+            contextToken: userContextTokens.get(userId) || msg.context_token || "",
+          })
+          return
+        }
       }
     }
   }

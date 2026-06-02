@@ -18,6 +18,7 @@ export type PendingAction =
   | { type: "select-model"; models: Array<{ providerID: string; modelID: string }> }
   | { type: "select-agent"; agents: string[] }
   | { type: "select-session"; sessions: Array<{ id: string; title: string; directory: string }> }
+  | { type: "select-project"; projects: Array<{ id: string; title: string; directory: string }> }
 
 const pendingActions = new Map<string, PendingAction>()
 
@@ -44,6 +45,7 @@ export interface UserPreferences {
 }
 
 const userPrefs = new Map<string, UserPreferences>()
+const userDirectories = new Map<string, string>()
 
 export function setUserPreference(userId: string, prefs: Partial<UserPreferences>) {
   const existing = userPrefs.get(userId) ?? {}
@@ -56,4 +58,16 @@ export function getUserPreferences(userId: string): UserPreferences {
 
 export function clearUserPreferences(userId: string) {
   userPrefs.delete(userId)
+}
+
+export function setUserDirectory(userId: string, directory: string) {
+  userDirectories.set(userId, directory)
+}
+
+export function getUserDirectory(userId: string): string | undefined {
+  return userDirectories.get(userId)
+}
+
+export function clearUserDirectory(userId: string) {
+  userDirectories.delete(userId)
 }
